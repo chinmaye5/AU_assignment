@@ -20,7 +20,9 @@ from solution.files import (
 )
 from solution.leads import ingest_lead_file
 from solution.pii import get_fernet
+from solution.reports import generate_reports
 from solution.schema import load_dispositions, load_schemas
+from solution.verify import verify_database
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -106,17 +108,22 @@ def main(argv: list[str] | None = None) -> int:
             conn.close()
             return 0
         elif args.command == "report":
-            # Will be implemented in M4
+            conn = connect(db_path)
             out_dir = Path(args.out)
-            out_dir.mkdir(parents=True, exist_ok=True)
-            print(f"Report target {out_dir} prepared (database: {db_path})")
+            generate_reports(conn, schema_dir, out_dir)
+            conn.close()
+            print(f"Reports successfully generated in {out_dir}")
             return 0
         elif args.command == "verify":
-            # Will be implemented in M5
             conn = connect(db_path)
-            init_db(conn)
+            violations = verify_database(conn, schema_dir, db_path if db_path.exists() else None)
             conn.close()
-            print(f"Verified schema at {db_path}")
+            if violations:
+                sys.stderr.write("Verification failed with invariants violated:\n")
+                for v in violations:
+                    sys.stderr.write(f"  - {v}\n")
+                return 1
+            print(f"All database invariants verified successfully at {db_path}.")
             return 0
         return 0
     except Exception as exc:
