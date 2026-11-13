@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import Any
 
 from solution.config import (
     get_db_path,
@@ -19,7 +20,7 @@ from solution.files import (
     discover_lead_files,
 )
 from solution.leads import ingest_lead_file
-from solution.pii import get_fernet
+from solution.pii import PhoneHasher, get_fernet
 from solution.reports import generate_reports
 from solution.schema import load_dispositions, load_schemas
 from solution.verify import verify_database
@@ -71,10 +72,16 @@ def main(argv: list[str] | None = None) -> int:
             init_db(conn)
 
             drops = discover_drops(Path(args.path))
-            # Cache known event IDs to deduplicate quickly
             cur = conn.cursor()
+            # Cache known event IDs and leads to maximize ingestion throughput
             cur.execute("SELECT event_id FROM events")
             known_event_ids: set[str] = {row[0] for row in cur.fetchall()}
+
+            cur.execute("SELECT id, workflow_id, phone_hash, external_ref, pii_enc, attrs_json FROM leads")
+            lead_cache: dict[tuple[str, str], list[Any]] = {
+                (r[1], r[2]): [r[0], r[3], r[4], r[5]] for r in cur.fetchall()
+            }
+            phone_hasher = PhoneHasher(hmac_key)
 
             for drop_dir in drops:
                 # 1. Process all lead files first
@@ -83,7 +90,16 @@ def main(argv: list[str] | None = None) -> int:
                     if wf_id not in schemas:
                         sys.stderr.write(f"Warning: no schema for workflow {wf_id}, skipping {csv_path}\n")
                         continue
-                    res = ingest_lead_file(conn, csv_path, wf_id, schemas[wf_id], hmac_key, fernet)
+                    res = ingest_lead_file(
+                        conn,
+                        csv_path,
+                        wf_id,
+                        schemas[wf_id],
+                        hmac_key,
+                        fernet,
+                        lead_cache=lead_cache,
+                        phone_hasher=phone_hasher,
+                    )
                     rel_name = f"{wf_id}/{csv_path.name}"
                     if res.status == "skipped":
                         print(f"leads   {rel_name:<30} skipped (already ingested)")

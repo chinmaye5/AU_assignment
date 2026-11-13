@@ -45,11 +45,11 @@ def generate_reports(
     )
     leads = [
         LeadRecord(
-            workflow_id=r["workflow_id"],
-            phone_hash=r["phone_hash"],
-            phone_last4=r["phone_last4"],
-            batch_id=r["batch_id"],
-            external_ref=r["external_ref"],
+            workflow_id=r[0],
+            phone_hash=r[1],
+            phone_last4=r[2],
+            batch_id=r[3],
+            external_ref=r[4],
         )
         for r in cur.fetchall()
     ]
@@ -64,14 +64,14 @@ def generate_reports(
     )
     events = [
         EventRecord(
-            event_id=r["event_id"],
-            event_type=r["event_type"],
-            workflow_id=r["workflow_id"],
-            call_id=r["call_id"],
-            occurred_at_utc=r["occurred_at_utc"],
-            phone_hash=r["phone_hash"],
-            disposition_code=r["disposition_code"],
-            line_no=r["line_no"],
+            event_id=r[0],
+            event_type=r[1],
+            workflow_id=r[2],
+            call_id=r[3],
+            occurred_at_utc=r[4],
+            phone_hash=r[5],
+            disposition_code=r[6],
+            line_no=r[7],
         )
         for r in cur.fetchall()
     ]

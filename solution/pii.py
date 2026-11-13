@@ -17,6 +17,18 @@ def hash_phone(key: bytes, workflow_id: str, canonical_phone: str) -> str:
     return hmac.new(key, message, hashlib.sha256).hexdigest()
 
 
+class PhoneHasher:
+    """Reusable HMAC phone hasher using .copy() for high throughput."""
+
+    def __init__(self, key: bytes):
+        self._base_hmac = hmac.new(key, digestmod=hashlib.sha256)
+
+    def hash(self, workflow_id: str, canonical_phone: str) -> str:
+        h = self._base_hmac.copy()
+        h.update(f"{workflow_id}|{canonical_phone}".encode("utf-8"))
+        return h.hexdigest()
+
+
 def mask_phone(phone_last4: str) -> str:
     """Format masked phone number: '+91******' followed by the last 4 digits."""
     return f"+91******{phone_last4}"

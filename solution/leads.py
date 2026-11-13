@@ -21,7 +21,7 @@ from solution.parsing import (
     parse_phone,
     parse_string,
 )
-from solution.pii import decrypt_pii, encrypt_pii, hash_phone
+from solution.pii import PhoneHasher, decrypt_pii, encrypt_pii, hash_phone
 from solution.schema import FieldDef, WorkflowSchema
 
 
@@ -94,11 +94,16 @@ def ingest_lead_file(
     schema: WorkflowSchema,
     hmac_key: bytes,
     fernet: Fernet,
+    lead_cache: dict[tuple[str, str], list[Any]] | None = None,
+    phone_hasher: PhoneHasher | None = None,
 ) -> IngestLeadResult:
     """Ingest one lead CSV file against its workflow schema idempotently."""
     file_name = file_path.name
     batch_id = file_path.stem
     file_sha = sha256_file(file_path)
+
+    if phone_hasher is None:
+        phone_hasher = PhoneHasher(hmac_key)
 
     # 1. Check idempotency: if already ingested with same sha256, skip
     cur = conn.cursor()
@@ -216,7 +221,7 @@ def ingest_lead_file(
 
                 # Compute lead identity
                 canonical_phone = parsed_values[phone_field_name]
-                phone_h = hash_phone(hmac_key, workflow_id, canonical_phone)
+                phone_h = phone_hasher.hash(workflow_id, canonical_phone)
                 phone_l4 = canonical_phone[-4:]
                 ext_ref = parsed_values[schema.reference_field.name]
 
@@ -235,17 +240,22 @@ def ingest_lead_file(
                         attrs_data[fdef.name] = val
 
                 # Check if lead already exists
-                cur.execute(
-                    """
-                    SELECT id, external_ref, pii_enc, attrs_json
-                    FROM leads
-                    WHERE workflow_id = ? AND phone_hash = ?
-                    """,
-                    (workflow_id, phone_h),
-                )
-                existing_lead = cur.fetchone()
+                lead_key = (workflow_id, phone_h)
+                cached_lead = lead_cache.get(lead_key) if lead_cache is not None else None
+                if cached_lead is None and lead_cache is None:
+                    cur.execute(
+                        """
+                        SELECT id, external_ref, pii_enc, attrs_json
+                        FROM leads
+                        WHERE workflow_id = ? AND phone_hash = ?
+                        """,
+                        (workflow_id, phone_h),
+                    )
+                    r = cur.fetchone()
+                    if r is not None:
+                        cached_lead = [r["id"], r["external_ref"], r["pii_enc"], r["attrs_json"]]
 
-                if existing_lead is None:
+                if cached_lead is None:
                     # New lead: first valid row sets permanent batch_id
                     # Apply defaults after merging to fields still null
                     for fdef in schema.fields:
@@ -276,13 +286,15 @@ def ingest_lead_file(
                             file_id,
                         ),
                     )
+                    new_id = cur.lastrowid
+                    if lead_cache is not None:
+                        lead_cache[lead_key] = [new_id, str(ext_ref), pii_enc, attrs_json]
                 else:
                     # Duplicate row: merge into existing lead
                     duplicates_merged += 1
-                    lead_id = existing_lead["id"]
-                    curr_ref = existing_lead["external_ref"]
-                    curr_pii = decrypt_pii(fernet, existing_lead["pii_enc"])
-                    curr_attrs = json.loads(existing_lead["attrs_json"])
+                    lead_id, curr_ref, curr_pii_enc, curr_attrs_json = cached_lead
+                    curr_pii = decrypt_pii(fernet, curr_pii_enc)
+                    curr_attrs = json.loads(curr_attrs_json)
 
                     # Overwrite only fields whose new value is non-null
                     if ext_ref is not None:
@@ -315,6 +327,8 @@ def ingest_lead_file(
                         """,
                         (curr_ref, new_pii_enc, new_attrs_json, lead_id),
                     )
+                    if lead_cache is not None:
+                        lead_cache[lead_key] = [lead_id, curr_ref, new_pii_enc, new_attrs_json]
 
             # Insert all rejections
             if rejections:
