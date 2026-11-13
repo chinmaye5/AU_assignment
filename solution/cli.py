@@ -5,8 +5,22 @@ import argparse
 import sys
 from pathlib import Path
 
-from solution.config import get_db_path, get_schema_dir
+from solution.config import (
+    get_db_path,
+    get_fernet_key,
+    get_hmac_key,
+    get_schema_dir,
+)
 from solution.db import connect, init_db
+from solution.events import ingest_event_file
+from solution.files import (
+    discover_drops,
+    discover_event_files,
+    discover_lead_files,
+)
+from solution.leads import ingest_lead_file
+from solution.pii import get_fernet
+from solution.schema import load_dispositions, load_schemas
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -47,11 +61,49 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.command == "ingest":
-            # Will be implemented in M2/M3
+            schemas = load_schemas(schema_dir)
+            hmac_key = get_hmac_key()
+            fernet = get_fernet(get_fernet_key())
+
             conn = connect(db_path)
             init_db(conn)
+
+            drops = discover_drops(Path(args.path))
+            # Cache known event IDs to deduplicate quickly
+            cur = conn.cursor()
+            cur.execute("SELECT event_id FROM events")
+            known_event_ids: set[str] = {row[0] for row in cur.fetchall()}
+
+            for drop_dir in drops:
+                # 1. Process all lead files first
+                lead_files = discover_lead_files(drop_dir)
+                for wf_id, csv_path in lead_files:
+                    if wf_id not in schemas:
+                        sys.stderr.write(f"Warning: no schema for workflow {wf_id}, skipping {csv_path}\n")
+                        continue
+                    res = ingest_lead_file(conn, csv_path, wf_id, schemas[wf_id], hmac_key, fernet)
+                    rel_name = f"{wf_id}/{csv_path.name}"
+                    if res.status == "skipped":
+                        print(f"leads   {rel_name:<30} skipped (already ingested)")
+                    else:
+                        print(
+                            f"leads   {rel_name:<30} rows={res.rows_total} rejected={res.rows_rejected} "
+                            f"merged={res.duplicates_merged} warnings={res.field_warnings}"
+                        )
+
+                # 2. Process all event files
+                event_files = discover_event_files(drop_dir)
+                for jsonl_path in event_files:
+                    res_ev = ingest_event_file(conn, jsonl_path, hmac_key, known_event_ids)
+                    if res_ev.status == "skipped":
+                        print(f"events  {jsonl_path.name:<30} skipped (already ingested)")
+                    else:
+                        print(
+                            f"events  {jsonl_path.name:<30} lines={res_ev.lines_total} "
+                            f"malformed={res_ev.malformed_events} duplicates={res_ev.duplicate_events}"
+                        )
+
             conn.close()
-            print(f"Initialized database at {db_path} for ingestion of {args.path}")
             return 0
         elif args.command == "report":
             # Will be implemented in M4
